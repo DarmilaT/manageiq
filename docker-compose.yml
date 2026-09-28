@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   nginx:
     image: nginx:alpine
@@ -14,7 +12,20 @@ services:
     restart: unless-stopped
 
   app:
-    image: ghcr.io/${GITHUB_REPO}:latest
+    # image: ghcr.io/${GITHUB_REPO}:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: manageiq-app:latest
+    entrypoint: ["bash", "/entrypoint.sh"]
+    command:
+      ["bundle", "exec", "rails", "server", "-b", "0.0.0.0", "-p", "3000"]
+    volumes:
+      - ./docker/entrypoint.sh:/entrypoint.sh:ro
+      - ./docker/GUID:/app/GUID
+      - ./docker/BUILD:/app/BUILD:ro
+    ports:
+      - "3000:3000" # temporary, for testing Rails directly
     environment:
       - RAILS_ENV=production
       - SECRET_KEY_BASE=${SECRET_KEY_BASE}
@@ -22,15 +33,25 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=vmdb_production
-      - MEMCACHE_SERVERS=memcached:11211
+      - MEMCACHED_SERVER=memcached:11211
+      - RUN_MIGRATIONS=true
     depends_on:
       - db
       - memcached
     restart: unless-stopped
 
   worker:
-    image: ghcr.io/${GITHUB_REPO}:latest
-    command: bundle exec ruby lib/workers/bin/run_single_worker.rb MiqGenericWorker
+    # image: ghcr.io/${GITHUB_REPO}:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: manageiq-app:latest
+    entrypoint: ["bash", "/entrypoint.sh"]
+    command: ["bundle", "exec", "ruby", "lib/workers/bin/evm_server.rb"]
+    volumes:
+      - ./docker/entrypoint.sh:/entrypoint.sh:ro
+      - ./docker/GUID:/app/GUID
+      - ./docker/BUILD:/app/BUILD:ro
     environment:
       - RAILS_ENV=production
       - SECRET_KEY_BASE=${SECRET_KEY_BASE}
@@ -38,7 +59,8 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=vmdb_production
-      - MEMCACHE_SERVERS=memcached:11211
+      - MEMCACHED_SERVER=memcached:11211
+      - RUN_MIGRATIONS=false
     depends_on:
       - db
       - memcached
@@ -49,6 +71,7 @@ services:
     environment:
       - POSTGRES_USER=${DB_USER}
       - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=vmdb_production
     volumes:
       - pg_data:/var/lib/postgresql/data
     restart: unless-stopped

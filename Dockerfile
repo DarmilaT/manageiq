@@ -1,10 +1,12 @@
 FROM ruby:3.3.7-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cmake pkg-config libssl-dev libssh2-1-dev \
+    cmake pkg-config libssl-dev libssh2-1-dev libffi-dev \
     libcurl4-openssl-dev build-essential libpq-dev \
+    libxml2-dev libxslt1-dev zlib1g-dev libyaml-dev \
+    libgpg-error-dev gettext-base \
     git curl ca-certificates xz-utils && \
-    curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     npm install -g corepack && \
     corepack enable && \
@@ -13,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY Gemfile Gemfile.lock* ./
+
 RUN bundle config set --local build.rugged --with-ssh && \
     bundle config set --local without 'development test' && \
     bundle install --jobs=4
@@ -25,7 +28,7 @@ RUN cp config/database.pg.yml config/database.yml && \
 
 COPY docker/database.yml config/database.yml
 
-RUN GEM_UI=$(bundle show manageiq-ui-classic) && \
+RUN export GEM_UI=$(bundle show manageiq-ui-classic) && \
     node -e " \
       const fs = require('fs'); \
       const p = process.env.GEM_UI + '/package.json'; \
@@ -42,10 +45,7 @@ RUN GEM_UI=$(bundle show manageiq-ui-classic) && \
         '@babel/helpers': '^7.0.0', \
         '@babel/generator': '^7.0.0', \
         '@babel/parser': '^7.0.0', \
-        '@babel/code-frame': '^7.0.0', \
-        'babel-plugin-polyfill-corejs2': '^0.0.0', \
-        'babel-plugin-polyfill-corejs3': '^0.0.0', \
-        'babel-plugin-polyfill-regenerator': '^0.0.0' \
+        '@babel/code-frame': '^7.0.0' \
       }; \
       fs.writeFileSync(p, JSON.stringify(pkg, null, 2)); \
       console.log('Patched babel resolutions'); \
@@ -58,6 +58,7 @@ FROM ruby:3.3.7-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev libssl-dev libssh2-1 libcurl4 libgit2-dev \
+    gettext-base \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
