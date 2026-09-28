@@ -7,3 +7,10 @@ spec
 test
 *.md
 .env
+
+# TLS cert/key used by nginx — must never be baked into the app image
+certs/manageiq.crt
+certs/manageiq.key
+ 
+# runtime files mounted by docker-compose
+docker/GUID
