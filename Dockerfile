@@ -1,25 +1,79 @@
-ARG IMAGE_REF=latest-spassky
-FROM docker.io/manageiq/manageiq-ui-worker:${IMAGE_REF}
-MAINTAINER ManageIQ https://github.com/ManageIQ/manageiq
+FROM ruby:3.3.7-slim-bookworm AS builder
 
-ENV DATABASE_URL=postgresql://root@localhost/vmdb_production?encoding=utf8&pool=5&wait_timeout=5
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake pkg-config libssl-dev libssh2-1-dev libffi-dev \
+    libcurl4-openssl-dev build-essential libpq-dev \
+    libxml2-dev libxslt1-dev zlib1g-dev libyaml-dev \
+    libgpg-error-dev gettext-base \
+    git curl ca-certificates xz-utils && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install -g corepack && \
+    corepack enable && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN echo "# This file intentionally left blank. ManageIQ maintains its own SSL configuration" > /etc/httpd/conf.d/ssl.conf && \
-    dnf -y --setopt=tsflags=nodocs install \
-      manageiq-appliance      \
-      memcached               \
-      postgresql-server       \
-      mod_ssl                 \
-      &&                      \
-    dnf clean all && \
-    rm -rf /var/cache/dnf
+WORKDIR /app
 
-## Overwrite entrypoint from pods repo
-COPY container-assets/entrypoint /usr/local/bin
+COPY Gemfile Gemfile.lock* ./
 
-EXPOSE 443
+RUN bundle config set --local build.rugged --with-ssh && \
+    bundle config set --local without 'development test' && \
+    bundle install --jobs=4
 
-LABEL name="manageiq"
+COPY . .
 
-VOLUME "/var/lib/pgsql/data"
-VOLUME ${APP_ROOT}
+RUN cp config/database.pg.yml config/database.yml && \
+    cp config/cable.yml.sample config/cable.yml && \
+    cp certs/v2_key.dev certs/v2_key
+
+COPY docker/database.yml config/database.yml
+
+RUN export GEM_UI=$(bundle show manageiq-ui-classic) && \
+    node -e " \
+      const fs = require('fs'); \
+      const p = process.env.GEM_UI + '/package.json'; \
+      const pkg = JSON.parse(fs.readFileSync(p)); \
+      pkg.resolutions = { \
+        ...pkg.resolutions, \
+        '@babel/core': '^7.0.0', \
+        '@babel/preset-env': '^7.0.0', \
+        '@babel/preset-react': '^7.0.0', \
+        '@babel/preset-typescript': '^7.0.0', \
+        '@babel/traverse': '^7.0.0', \
+        '@babel/types': '^7.0.0', \
+        '@babel/template': '^7.0.0', \
+        '@babel/helpers': '^7.0.0', \
+        '@babel/generator': '^7.0.0', \
+        '@babel/parser': '^7.0.0', \
+        '@babel/code-frame': '^7.0.0' \
+      }; \
+      fs.writeFileSync(p, JSON.stringify(pkg, null, 2)); \
+      console.log('Patched babel resolutions'); \
+    "
+
+RUN RAILS_ENV=production SECRET_KEY_BASE=placeholder bundle exec rake update:ui
+RUN RAILS_ENV=production SECRET_KEY_BASE=placeholder bundle exec rake assets:precompile
+
+FROM ruby:3.3.7-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev libssl-dev libssh2-1 libcurl4 libgit2-dev \
+    gettext-base \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /usr/local/bundle /usr/local/bundle
+COPY --from=builder /app /app
+
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENV RAILS_ENV=production
+ENV RAILS_SERVE_STATIC_FILES=true
+ENV RAILS_LOG_TO_STDOUT=true
+
+EXPOSE 3000
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["bundle", "exec", "rails", "server", "-b", "0.0.0.0", "-p", "3000"]
