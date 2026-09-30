@@ -106,3 +106,7 @@ bundler.d/*
 # yardoc
 /doc/
 .yardoc
+
+.env
+certs/*.key
+certs/*.crt
