@@ -1,10 +1,16 @@
 .git
-/data/*
-/public/assets
-/public/doc
-/public/packs
-/public/pictures
-/public/ui
-/public/upload
-/public/webmks
-/tmp/*
+log/*
+tmp/*
+node_modules
+public/assets
+spec
+test
+*.md
+.env
+
+# TLS cert/key used by nginx — must never be baked into the app image
+certs/manageiq.crt
+certs/manageiq.key
+ 
+# runtime files mounted by docker-compose
+docker/GUID

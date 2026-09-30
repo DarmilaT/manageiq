@@ -1,0 +1,174 @@
+name: CI
+
+# ------------------------------------------------------------------
+# Release branch: spassky-1-stable
+#   - Pull requests / feature branches  -> build the image only (check it works)
+#   - Push/merge to spassky-1-stable    -> build, push to ECR, deploy to EC2
+# If the release branch changes, update every "spassky-1-stable" in this file.
+# ------------------------------------------------------------------
+
+on:
+  push:
+    branches-ignore:
+      - dependabot/*
+      - renovate/*
+  pull_request:
+    branches:
+      - spassky-1-stable
+  workflow_dispatch:
+
+# Cancel outdated runs on feature branches, never on the release branch
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: ${{ github.ref != 'refs/heads/spassky-1-stable' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------
+  # CI: build the image (all branches), push to ECR (release branch)
+  # ---------------------------------------------------------------
+  #
+  # LOCAL EQUIVALENT of this job (reference only, not executed by GitHub):
+  #
+  #   Build and run locally (uses docker-compose.yml with its build: section):
+  #     docker compose up -d --build
+  #
+  #   Build and push to ECR by hand (needs your own AWS credentials with ECR push rights;
+  #   use a unique tag, ECR tags are immutable):
+  #     docker build -t manageiq-app:local .
+  #     aws ecr get-login-password --region us-east-1 |
+  #       docker login --username AWS --password-stdin 917950986309.dkr.ecr.us-east-1.amazonaws.com
+  #     docker tag  manageiq-app:local 917950986309.dkr.ecr.us-east-1.amazonaws.com/<ecr-repo>:local-<date>
+  #     docker push 917950986309.dkr.ecr.us-east-1.amazonaws.com/<ecr-repo>:local-<date>
+  #
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write # lets GitHub issue the OIDC token for AWS
+    env:
+      # Push only on a direct push/merge to the release branch.
+      PUSH_IMAGE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/spassky-1-stable' }}
+      #
+      # To test the ECR push from a feature branch, TEMPORARILY replace the line above with
+      # the one below (and allow that branch in the IAM trust policy). Revert before merging.
+      # PUSH_IMAGE: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/spassky-1-stable' || github.ref == 'refs/heads/<your-branch>') }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials (OIDC)
+        if: env.PUSH_IMAGE == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        if: env.PUSH_IMAGE == 'true'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Decide image tag
+        id: tags
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPO: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          if [ "$PUSH_IMAGE" = "true" ]; then
+            echo "tags=${REGISTRY}/${REPO}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=manageiq-app:ci-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build (and push when enabled)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: ${{ env.PUSH_IMAGE == 'true' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false # avoids extra "unknown" manifests in ECR
+
+      - name: Summary
+        env:
+          IMAGE: ${{ steps.tags.outputs.tags }}
+        run: |
+          if [ "$PUSH_IMAGE" = "true" ]; then
+            echo "### Pushed image" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Built image (not pushed)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "\`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------
+  # CD: deploy the new image to EC2 (release branch only)
+  # ---------------------------------------------------------------
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/spassky-1-stable'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production # optional approval gate (Settings -> Environments)
+    concurrency:
+      group: deploy-production # one deploy at a time, never cancelled
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy via SSM
+        env:
+          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          TAG: ${{ github.sha }}
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy $TAG" \
+            --parameters "commands=[\"/opt/manageiq/deploy.sh $TAG\"],executionTimeout=[\"1500\"]" \
+            --query "Command.CommandId" --output text)
+          echo "SSM command: $CMD_ID"
+
+          # Poll until the command finishes (up to ~25 min)
+          STATUS="Pending"
+          for _ in $(seq 1 150); do
+            sleep 10
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            echo "Status: $STATUS"
+            case "$STATUS" in
+              Pending|InProgress|Delayed) continue ;;
+              *) break ;;
+            esac
+          done
+
+          echo "----- output from server -----"
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query "StandardOutputContent" --output text
+          echo "----- errors from server -----"
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text
+
+          [ "$STATUS" = "Success" ]
+
+      - name: Summary
+        env:
+          TAG: ${{ github.sha }}
+        run: echo "### Deployed \`${TAG}\` to production" >> "$GITHUB_STEP_SUMMARY"

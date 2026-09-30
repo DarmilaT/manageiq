@@ -1,0 +1,76 @@
+# deploy/docker-compose.prod.yml  ->  installed on the server as /opt/manageiq/docker-compose.yml
+# Same as the local docker-compose.yml, but pulls the CI-built image from ECR instead of building.
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/ssl/certs:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  app:
+    image: ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG:?IMAGE_TAG is not set - run deploy.sh <tag>}
+    entrypoint: ["bash", "/entrypoint.sh"]
+    command:
+      ["bundle", "exec", "rails", "server", "-b", "0.0.0.0", "-p", "3000"]
+    volumes:
+      - ./docker/entrypoint.sh:/entrypoint.sh:ro
+      - ./docker/GUID:/app/GUID
+      - ./docker/BUILD:/app/BUILD:ro
+    environment:
+      - RAILS_ENV=production
+      - SECRET_KEY_BASE=${SECRET_KEY_BASE}
+      - DB_HOST=db
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=vmdb_production
+      - MEMCACHED_SERVER=memcached:11211
+      - RUN_MIGRATIONS=true
+    depends_on:
+      - db
+      - memcached
+    restart: unless-stopped
+
+  worker:
+    image: ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG:?IMAGE_TAG is not set - run deploy.sh <tag>}
+    entrypoint: ["bash", "/entrypoint.sh"]
+    command: ["bundle", "exec", "ruby", "lib/workers/bin/evm_server.rb"]
+    volumes:
+      - ./docker/entrypoint.sh:/entrypoint.sh:ro
+      - ./docker/GUID:/app/GUID
+      - ./docker/BUILD:/app/BUILD:ro
+    environment:
+      - RAILS_ENV=production
+      - SECRET_KEY_BASE=${SECRET_KEY_BASE}
+      - DB_HOST=db
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=vmdb_production
+      - MEMCACHED_SERVER=memcached:11211
+      - RUN_MIGRATIONS=false
+    depends_on:
+      - db
+      - memcached
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=vmdb_production
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  memcached:
+    image: memcached:alpine
+    restart: unless-stopped
+
+volumes:
+  pg_data:
